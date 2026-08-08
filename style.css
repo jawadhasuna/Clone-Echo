@@ -168,6 +168,8 @@ body {
   cursor: pointer;
   background: transparent;
   overflow: hidden;
+  clip-path: circle(50%);
+  -webkit-clip-path: circle(50%);
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
   position: relative;
   z-index: 2;
