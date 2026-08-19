@@ -23,6 +23,17 @@ let activeSource = null;
 let reactivityFrame = null;
 let currentOrbMode = "idle"; // mirrors turnState for the animation loop
 
+// iOS home-screen web apps run in their own WebKit instance, separate from
+// Safari, and speech recognition is commonly denied there outright. Detect it
+// so the error can say something the user can actually act on.
+const isStandalone =
+  window.navigator.standalone === true ||
+  window.matchMedia("(display-mode: standalone)").matches;
+
+const isIOS =
+  /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
 // ============================================================
 // UI helpers
 // ============================================================
@@ -256,7 +267,11 @@ async function startTurn() {
     if (event.error === "no-speech") {
       showError("Didn't catch that — tap the circle and try again.");
     } else if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-      showError("Microphone access was blocked. Check browser permissions and try again.");
+      showError(
+        isStandalone && isIOS
+          ? "The mic doesn't work when this is opened from the home screen. Remove the icon, open clonesecho.vercel.app in Safari, and add it again."
+          : "Microphone access was blocked. Check browser permissions and try again."
+      );
     } else if (event.error === "network") {
       showError("Speech recognition needs a network connection — check your connection and try again.");
     } else {
