@@ -83,8 +83,10 @@ function reactivityLoop() {
   orb.style.setProperty("--level", smoothed.toFixed(3));
 
   if (orbInner) {
-    const duration = 11 - smoothed * 7;
-    orbInner.style.animationDuration = `${duration.toFixed(2)}s`;
+    // Do NOT touch animation-duration here. Changing it on a running
+    // animation makes the browser re-derive the current position from the
+    // elapsed time, so the gradient jumps. Once per frame that reads as a
+    // flicker. Blur is a plain filter and can safely track the level.
     const blurAmount = 16 - smoothed * 6;
     orbInner.style.filter = `blur(${blurAmount.toFixed(1)}px) saturate(1.4) contrast(1.25)`;
   }
