@@ -5,7 +5,10 @@
 // Speech recognition transcribes based on the SPOKEN language, not
 // romanization — set this to match what you actually say out loud.
 // Examples: "en-US", "hi-IN" (Hindi), "ur-PK" (Urdu).
-const RECOGNITION_LANG = "en-US";
+const SEND_SAMPLE_RATE = 16000;   // what Gemini wants, and small to upload
+const SILENCE_MS = 1500;          // quiet for this long ends the turn
+const SPEECH_LEVEL = 0.045;       // RMS above this counts as speech
+const MAX_TURN_MS = 20000;        // hard stop so a stuck mic cannot hang
 
 // ---- DOM references ----
 const orb = document.getElementById("orb");
@@ -15,24 +18,22 @@ const orbInner = document.querySelector(".orb-inner");
 
 // ---- State ----
 let turnState = "idle"; // "idle" | "listening" | "thinking" | "talking"
-let recognition = null;
+let micStream = null;
+let micContext = null;
+let micSourceNode = null;
+let micProcessorNode = null;
+let micAnalyser = null;
+let recordedChunks = [];
+let recordedSampleRate = 16000;
+let silenceTimer = null;
+let maxTurnTimer = null;
+let sawSpeech = false;
 let playbackContext = null;
 let playbackAnalyser = null;
 let activeSource = null;
 
 let reactivityFrame = null;
 let currentOrbMode = "idle"; // mirrors turnState for the animation loop
-
-// iOS home-screen web apps run in their own WebKit instance, separate from
-// Safari, and speech recognition is commonly denied there outright. Detect it
-// so the error can say something the user can actually act on.
-const isStandalone =
-  window.navigator.standalone === true ||
-  window.matchMedia("(display-mode: standalone)").matches;
-
-const isIOS =
-  /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 
 // ============================================================
 // UI helpers
@@ -163,11 +164,12 @@ function stopPlayback() {
 // ============================================================
 // Backend calls
 // ============================================================
-async function getGeminiReply(message) {
+/** Takes { audio, mimeType } now - Gemini transcribes and replies in one call. */
+async function getGeminiReply(payload) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(payload),
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
@@ -191,48 +193,121 @@ async function getClonedSpeech(text) {
 }
 
 // ============================================================
-// Speech recognition (mic -> text)
+// Microphone capture
+// ------------------------------------------------------------
+// Deliberately NOT the Web Speech API. On iOS that routes through Apple's
+// dictation service, which refuses with service-not-allowed unless Dictation
+// is enabled at the OS level - the microphone itself is fine. Capturing raw
+// audio and letting Gemini transcribe it removes that dependency entirely,
+// the same way Atom-Voice does.
 // ============================================================
-function createRecognition() {
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) return null;
 
-  const rec = new SpeechRecognition();
-  rec.lang = RECOGNITION_LANG;
-  rec.continuous = false;
-  rec.interimResults = false;
-  rec.maxAlternatives = 1;
-  return rec;
+function downsample(buffer, from, to) {
+  if (to === from) return buffer;
+  const ratio = from / to;
+  const out = new Float32Array(Math.round(buffer.length / ratio));
+  let o = 0, i = 0;
+  while (o < out.length) {
+    const next = Math.round((o + 1) * ratio);
+    let sum = 0, n = 0;
+    for (; i < next && i < buffer.length; i++) { sum += buffer[i]; n++; }
+    out[o++] = n ? sum / n : 0;
+  }
+  return out;
 }
 
-/**
- * Ask for the microphone before starting recognition.
- *
- * Chrome's webkitSpeechRecognition.start() raises the permission prompt on
- * its own. Safari's does not - it expects permission to already be granted
- * and fires not-allowed straight away otherwise. That single difference is
- * why this worked in Chrome and never in Safari.
- *
- * The stream is released the instant it is granted. Holding it open would
- * leave a second mic capture running alongside the one the Web Speech API
- * opens for itself, which is what broke recognition on mobile before.
- */
-let lastMicPrimeResult = null;
-let lastMicError = null;
+/** Float samples -> a complete 16-bit PCM WAV file. */
+function encodeWav(chunks, sampleRate) {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const buffer = new ArrayBuffer(44 + total * 2);
+  const view = new DataView(buffer);
+  const str = (off, t) => { for (let i = 0; i < t.length; i++) view.setUint8(off + i, t.charCodeAt(i)); };
 
-async function ensureMicAccess() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    return true; // nothing to prime; let recognition try on its own
+  str(0, "RIFF");
+  view.setUint32(4, 36 + total * 2, true);
+  str(8, "WAVE");
+  str(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);            // PCM
+  view.setUint16(22, 1, true);            // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  str(36, "data");
+  view.setUint32(40, total * 2, true);
+
+  let off = 44;
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i++, off += 2) {
+      const v = Math.max(-1, Math.min(1, c[i]));
+      view.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+    }
   }
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach((track) => track.stop());
-    return true;
-  } catch (err) {
-    console.warn("Microphone permission denied:", err && err.name);
-    lastMicError = (err && err.name) || "unknown";
-    return false;
+  return buffer;
+}
+
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
   }
+  return btoa(bin);
+}
+
+async function startRecording() {
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  micContext = new (window.AudioContext || window.webkitAudioContext)();
+  if (micContext.state === "suspended") await micContext.resume();
+
+  recordedChunks = [];
+  recordedSampleRate = SEND_SAMPLE_RATE;
+  sawSpeech = false;
+
+  micSourceNode = micContext.createMediaStreamSource(micStream);
+  micAnalyser = micContext.createAnalyser();
+  micAnalyser.fftSize = 256;
+  micSourceNode.connect(micAnalyser);
+
+  micProcessorNode = micContext.createScriptProcessor(4096, 1, 1);
+  micProcessorNode.onaudioprocess = (e) => {
+    if (turnState !== "listening") return;
+    const input = e.inputBuffer.getChannelData(0);
+    recordedChunks.push(downsample(new Float32Array(input), micContext.sampleRate, SEND_SAMPLE_RATE));
+
+    let sum = 0;
+    for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+    const rms = Math.sqrt(sum / input.length);
+
+    if (rms > SPEECH_LEVEL) {
+      sawSpeech = true;
+      if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+    } else if (sawSpeech && !silenceTimer) {
+      silenceTimer = setTimeout(() => finishRecording(), SILENCE_MS);
+    }
+  };
+
+  micSourceNode.connect(micProcessorNode);
+  // ScriptProcessorNode only fires while connected to a destination, but the
+  // raw mic must never be audible - route it through a zero-gain node.
+  const mute = micContext.createGain();
+  mute.gain.value = 0;
+  micProcessorNode.connect(mute);
+  mute.connect(micContext.destination);
+}
+
+function stopRecording() {
+  if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+  if (micProcessorNode) { micProcessorNode.onaudioprocess = null; micProcessorNode.disconnect(); }
+  if (micSourceNode) micSourceNode.disconnect();
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  if (micContext) micContext.close();
+  micProcessorNode = micSourceNode = micStream = micContext = micAnalyser = null;
 }
 
 // ============================================================
@@ -241,95 +316,71 @@ async function ensureMicAccess() {
 async function startTurn() {
   if (turnState !== "idle") return;
 
-  // Priming the permission helps Safari, but it must not be a gate: on some
-  // iOS builds getUserMedia is refused while recognition itself still works,
-  // and bailing here would stop it before it ever got a chance. Ask, note the
-  // answer, then carry on regardless and let recognition report its own error.
-  lastMicPrimeResult = await ensureMicAccess();
-
-  recognition = createRecognition();
-  if (!recognition) {
-    showError("This browser can't do speech recognition. Try Safari, Chrome or Edge.");
-    return;
-  }
-
   try {
     clearError();
     turnState = "listening";
     setOrbState("listening");
     setStatus("listening", true);
 
-    // Start inside the tap's gesture so iOS/Safari don't suspend the
-    // playback context we'll need a moment later.
+    // Start inside the tap's gesture so iOS does not suspend the playback
+    // context we need a moment later.
     ensurePlaybackContext();
+    await startRecording();
+
+    // Safety net: never let a stuck mic hold the turn open forever.
+    maxTurnTimer = setTimeout(() => {
+      if (turnState === "listening") finishRecording();
+    }, MAX_TURN_MS);
   } catch (err) {
     console.error(err);
-    showError("Something went wrong starting the call. Try again.");
+    showError(
+      err && err.name === "NotAllowedError"
+        ? "Microphone blocked. Tap AA in the address bar > Website Settings > Microphone > Allow."
+        : "Couldn't start the microphone. Try again."
+    );
+    stopRecording();
+    resetToIdle();
+  }
+}
+
+/** Called by the silence detector, the timeout, or a second tap. */
+async function finishRecording() {
+  if (turnState !== "listening") return;
+
+  if (maxTurnTimer) { clearTimeout(maxTurnTimer); maxTurnTimer = null; }
+  const chunks = recordedChunks;
+  const heardSomething = sawSpeech;
+  stopRecording();
+
+  if (!heardSomething || !chunks.length) {
+    showError("Didn't catch any speech — tap the heart and try again.");
     resetToIdle();
     return;
   }
 
-  recognition.onresult = async (event) => {
-    const transcript = event.results[0][0].transcript.trim();
+  try {
+    turnState = "thinking";
+    setOrbState("connecting");
+    setStatus("thinking", true);
 
-    if (!transcript) {
-      resetToIdle();
-      return;
-    }
+    const wav = encodeWav(chunks, recordedSampleRate);
+    const reply = await getGeminiReply({
+      audio: arrayBufferToBase64(wav),
+      mimeType: "audio/wav",
+    });
 
-    try {
-      turnState = "thinking";
-      setOrbState("connecting");
-      setStatus("thinking", true);
+    setStatus("generating", true);
+    const audioBuffer = await getClonedSpeech(reply);
 
-      const reply = await getGeminiReply(transcript);
+    turnState = "talking";
+    await playReplyAudio(audioBuffer);
 
-      setStatus("generating", true);
-      const audioBuffer = await getClonedSpeech(reply);
-
-      turnState = "talking";
-      await playReplyAudio(audioBuffer);
-
-      resetToIdle();
-    } catch (err) {
-      console.error(err);
-      showError(err.message || "Something went wrong. Tap the circle to try again.");
-      resetToIdle();
-    }
-  };
-
-  recognition.onerror = (event) => {
-    console.error("Speech recognition error:", event.error);
-    if (event.error === "no-speech") {
-      showError("Didn't catch that — tap the circle and try again.");
-    } else if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-      showError(
-        event.error === "service-not-allowed"
-          ? "iOS blocked speech recognition. Settings > General > Keyboard > Enable Dictation must be on, then reload."
-          : lastMicPrimeResult === false
-          ? `Microphone blocked (${lastMicError}). Tap AA in the address bar > Website Settings > Microphone > Allow.`
-          : "Speech recognition was refused even though the microphone is allowed. Open /diagnose.html and send me what it says."
-      );
-    } else if (event.error === "network") {
-      showError("Speech recognition needs a network connection — check your connection and try again.");
-    } else {
-      showError(`Speech recognition error: ${event.error}`);
-    }
     resetToIdle();
-  };
-
-  recognition.onend = () => {
-    // If recognition ended without ever firing onresult AND without
-    // onerror (this can happen silently on some mobile browsers), make
-    // sure we don't get stuck in "listening" — and actually tell the
-    // person something happened instead of quietly resetting.
-    if (turnState === "listening") {
-      showError("Didn't catch any speech — tap the circle and try again.");
-      resetToIdle();
-    }
-  };
-
-  recognition.start();
+  } catch (err) {
+    console.error(err);
+    showError(err.message || "Something went wrong. Tap the heart to try again.");
+    resetToIdle();
+  }
 }
 
 function resetToIdle() {
@@ -339,17 +390,8 @@ function resetToIdle() {
 }
 
 function cancelTurn() {
-  if (recognition) {
-    recognition.onresult = null;
-    recognition.onerror = null;
-    recognition.onend = null;
-    try {
-      recognition.abort();
-    } catch (e) {
-      /* already stopped */
-    }
-    recognition = null;
-  }
+  if (maxTurnTimer) { clearTimeout(maxTurnTimer); maxTurnTimer = null; }
+  stopRecording();
   stopPlayback();
   clearError();
   resetToIdle();
@@ -362,5 +404,6 @@ function cancelTurn() {
 // Removing the stop button without this would leave a turn with no way out.
 orb.addEventListener("click", () => {
   if (turnState === "idle") startTurn();
+  else if (turnState === "listening") finishRecording();  // tap to send early
   else cancelTurn();
 });

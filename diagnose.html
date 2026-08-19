@@ -27,7 +27,7 @@
 <body>
 
 <h1>Microphone diagnostics</h1>
-<p class="sub">Tap the button, allow anything it asks for, then copy the text box at the bottom and send it.</p>
+<p class="sub">Tap the button, allow the microphone, then <strong>talk for three seconds</strong>. Copy the box at the bottom and send it.</p>
 
 <button id="run">Run the test</button>
 <div id="out"></div>
@@ -87,35 +87,46 @@ document.getElementById("run").addEventListener("click", async () => {
     add("gUM message", e.message || "(none)");
   }
 
-  // does recognition actually start?
-  if (!SR) { add("recognition", "cannot test, API missing", "bad"); return; }
-  await new Promise((resolve) => {
-    let settled = false;
-    const rec = new SR();
-    rec.lang = "en-US";
-    rec.continuous = false;
-    rec.interimResults = false;
+  // the app no longer uses SpeechRecognition; test the pipeline it does use
+  add("uses SpeechRecognition", "no — replaced with audio capture + Gemini");
 
-    const done = (label, cls, extra) => {
-      if (settled) return;
-      settled = true;
-      add("recognition", label, cls);
-      if (extra) add("recognition detail", extra);
-      try { rec.abort(); } catch (_) {}
-      resolve();
+  try {
+    const stream2 = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    if (ctx.state === "suspended") await ctx.resume();
+    add("AudioContext", ctx.state, ctx.state === "running" ? "ok" : "warn");
+    add("context sampleRate", String(ctx.sampleRate));
+
+    const src = ctx.createMediaStreamSource(stream2);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    let frames = 0, peak = 0;
+    proc.onaudioprocess = (e) => {
+      const d = e.inputBuffer.getChannelData(0);
+      frames++;
+      for (let i = 0; i < d.length; i++) peak = Math.max(peak, Math.abs(d[i]));
     };
+    src.connect(proc);
+    const mute = ctx.createGain(); mute.gain.value = 0;
+    proc.connect(mute); mute.connect(ctx.destination);
 
-    rec.onstart = () => add("recognition onstart", "fired — say something", "ok");
-    rec.onaudiostart = () => add("audio captured", "yes", "ok");
-    rec.onresult = (ev) => done("HEARD: " + ev.results[0][0].transcript, "ok");
-    rec.onerror = (ev) => done("ERROR — " + ev.error, "bad", ev.message || "");
-    rec.onend = () => done("ended with no result", "warn");
+    add("recording", "say something for 3 seconds…", "warn");
+    await new Promise((r) => setTimeout(r, 3000));
 
-    try { rec.start(); }
-    catch (e) { done("start() threw — " + e.name, "bad", e.message); }
+    proc.onaudioprocess = null; proc.disconnect(); src.disconnect();
+    stream2.getTracks().forEach((t) => t.stop());
+    await ctx.close();
 
-    setTimeout(() => done("timed out after 8s", "warn"), 8000);
-  });
+    add("audio frames captured", String(frames), frames > 0 ? "ok" : "bad");
+    add("peak level", peak.toFixed(4), peak > 0.01 ? "ok" : "bad");
+    add("verdict", peak > 0.01 ? "MIC WORKS — audio is reaching the page" : "silence — mic gave no signal",
+        peak > 0.01 ? "ok" : "bad");
+  } catch (e) {
+    add("capture test", "FAILED — " + e.name, "bad");
+    add("detail", e.message || "(none)");
+  }
 });
 </script>
 </body>

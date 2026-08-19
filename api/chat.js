@@ -1,8 +1,11 @@
 // ============================================================
 // POST /api/chat
 // ------------------------------------------------------------
-// Takes { message: "..." } (text the browser already transcribed
-// from your voice) and asks Gemini for a short, casual reply.
+// Takes { audio: "<base64 wav>", mimeType } - or { message } for text - and
+// asks Gemini for a short, casual reply. Sending audio lets Gemini do the
+// transcription itself, which is what keeps the browser off the Web Speech
+// API; on iOS that routes through Apple's dictation service and is refused
+// unless Dictation is enabled at the OS level.
 // GEMINI_API_KEY never leaves this function — the browser never
 // talks to Gemini directly in this flow.
 // ============================================================
@@ -21,9 +24,11 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { message } = req.body || {};
-  if (!message || typeof message !== "string") {
-    return res.status(400).json({ error: "Missing 'message' in request body." });
+  const { message, audio, mimeType } = req.body || {};
+  const hasAudio = typeof audio === "string" && audio.length > 0;
+  const hasText = typeof message === "string" && message.length > 0;
+  if (!hasAudio && !hasText) {
+    return res.status(400).json({ error: "Send either 'audio' or 'message'." });
   }
 
   const apiKey = process.env.GEMINI_API_KEY;
@@ -42,7 +47,17 @@ module.exports = async function handler(req, res) {
           "x-goog-api-key": apiKey,
         },
         body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: message }] }],
+          contents: [
+            {
+              role: "user",
+              parts: hasAudio
+                ? [
+                    { text: "The user said this out loud. Reply to them directly." },
+                    { inlineData: { mimeType: mimeType || "audio/wav", data: audio } },
+                  ]
+                : [{ text: message }],
+            },
+          ],
           systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
         }),
       }
