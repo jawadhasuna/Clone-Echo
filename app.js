@@ -205,15 +205,53 @@ function createRecognition() {
   return rec;
 }
 
+/**
+ * Ask for the microphone before starting recognition.
+ *
+ * Chrome's webkitSpeechRecognition.start() raises the permission prompt on
+ * its own. Safari's does not - it expects permission to already be granted
+ * and fires not-allowed straight away otherwise. That single difference is
+ * why this worked in Chrome and never in Safari.
+ *
+ * The stream is released the instant it is granted. Holding it open would
+ * leave a second mic capture running alongside the one the Web Speech API
+ * opens for itself, which is what broke recognition on mobile before.
+ */
+async function ensureMicAccess() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return true; // nothing to prime; let recognition try on its own
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach((track) => track.stop());
+    return true;
+  } catch (err) {
+    console.warn("Microphone permission denied:", err && err.name);
+    return false;
+  }
+}
+
 // ============================================================
 // Turn flow
 // ============================================================
 async function startTurn() {
   if (turnState !== "idle") return;
 
+  // Safari needs the permission granted before recognition starts.
+  const micOk = await ensureMicAccess();
+  if (!micOk) {
+    showError(
+      isIOS
+        ? "Microphone blocked. Tap the AA icon in Safari's address bar, choose Website Settings, and allow the microphone."
+        : "Microphone blocked. Allow mic access for this site in your browser settings, then try again."
+    );
+    resetToIdle();
+    return;
+  }
+
   recognition = createRecognition();
   if (!recognition) {
-    showError("Your browser doesn't support speech recognition. Try Chrome or Edge.");
+    showError("This browser can't do speech recognition. Try Safari, Chrome or Edge.");
     return;
   }
 
