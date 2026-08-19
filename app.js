@@ -217,6 +217,9 @@ function createRecognition() {
  * leave a second mic capture running alongside the one the Web Speech API
  * opens for itself, which is what broke recognition on mobile before.
  */
+let lastMicPrimeResult = null;
+let lastMicError = null;
+
 async function ensureMicAccess() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     return true; // nothing to prime; let recognition try on its own
@@ -227,6 +230,7 @@ async function ensureMicAccess() {
     return true;
   } catch (err) {
     console.warn("Microphone permission denied:", err && err.name);
+    lastMicError = (err && err.name) || "unknown";
     return false;
   }
 }
@@ -237,17 +241,11 @@ async function ensureMicAccess() {
 async function startTurn() {
   if (turnState !== "idle") return;
 
-  // Safari needs the permission granted before recognition starts.
-  const micOk = await ensureMicAccess();
-  if (!micOk) {
-    showError(
-      isIOS
-        ? "Microphone blocked. Tap the AA icon in Safari's address bar, choose Website Settings, and allow the microphone."
-        : "Microphone blocked. Allow mic access for this site in your browser settings, then try again."
-    );
-    resetToIdle();
-    return;
-  }
+  // Priming the permission helps Safari, but it must not be a gate: on some
+  // iOS builds getUserMedia is refused while recognition itself still works,
+  // and bailing here would stop it before it ever got a chance. Ask, note the
+  // answer, then carry on regardless and let recognition report its own error.
+  lastMicPrimeResult = await ensureMicAccess();
 
   recognition = createRecognition();
   if (!recognition) {
@@ -306,9 +304,11 @@ async function startTurn() {
       showError("Didn't catch that — tap the circle and try again.");
     } else if (event.error === "not-allowed" || event.error === "service-not-allowed") {
       showError(
-        isStandalone && isIOS
-          ? "The mic doesn't work when this is opened from the home screen. Remove the icon, open clonesecho.vercel.app in Safari, and add it again."
-          : "Microphone access was blocked. Check browser permissions and try again."
+        event.error === "service-not-allowed"
+          ? "iOS blocked speech recognition. Settings > General > Keyboard > Enable Dictation must be on, then reload."
+          : lastMicPrimeResult === false
+          ? `Microphone blocked (${lastMicError}). Tap AA in the address bar > Website Settings > Microphone > Allow.`
+          : "Speech recognition was refused even though the microphone is allowed. Open /diagnose.html and send me what it says."
       );
     } else if (event.error === "network") {
       showError("Speech recognition needs a network connection — check your connection and try again.");

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Clone Echo — mic diagnostics</title>
+<style>
+  :root { --ink:#12100E; --bg:#F7F4EE; --line:#ded9d1; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+         background:var(--bg); color:var(--ink); padding:20px; }
+  h1 { font-size:18px; margin-bottom:4px; }
+  p.sub { font-size:13px; opacity:.65; margin-bottom:18px; }
+  button { width:100%; padding:14px; font-size:16px; font-weight:600;
+           background:var(--ink); color:var(--bg); border:none; border-radius:10px;
+           margin-bottom:16px; cursor:pointer; }
+  .row { display:flex; gap:10px; padding:9px 0; border-bottom:1px solid var(--line);
+         font-size:14px; align-items:flex-start; }
+  .k { flex:0 0 42%; opacity:.6; }
+  .v { flex:1; font-weight:600; word-break:break-word; }
+  .ok { color:#0a7d4f; } .bad { color:#b3261e; } .warn { color:#8a5a00; }
+  #out { margin-top:6px; }
+  textarea { width:100%; height:150px; margin-top:16px; font:12px/1.4 ui-monospace,monospace;
+             padding:10px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+</style>
+</head>
+<body>
+
+<h1>Microphone diagnostics</h1>
+<p class="sub">Tap the button, allow anything it asks for, then copy the text box at the bottom and send it.</p>
+
+<button id="run">Run the test</button>
+<div id="out"></div>
+<textarea id="copy" readonly placeholder="Results appear here"></textarea>
+
+<script>
+const out = document.getElementById("out");
+const copy = document.getElementById("copy");
+const lines = [];
+
+function add(k, v, cls) {
+  lines.push(`${k}: ${v}`);
+  const row = document.createElement("div");
+  row.className = "row";
+  row.innerHTML = `<div class="k"></div><div class="v ${cls || ""}"></div>`;
+  row.children[0].textContent = k;
+  row.children[1].textContent = v;
+  out.appendChild(row);
+  copy.value = lines.join("\n");
+}
+
+document.getElementById("run").addEventListener("click", async () => {
+  out.innerHTML = ""; lines.length = 0;
+
+  add("URL", location.href);
+  add("secure context", String(window.isSecureContext), window.isSecureContext ? "ok" : "bad");
+  add("user agent", navigator.userAgent);
+  add("standalone", String(window.navigator.standalone === true ||
+      matchMedia("(display-mode: standalone)").matches));
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  add("SpeechRecognition exists", String(!!SR), SR ? "ok" : "bad");
+  add("getUserMedia exists", String(!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)),
+      navigator.mediaDevices?.getUserMedia ? "ok" : "bad");
+
+  // permission state, where the browser exposes it
+  try {
+    if (navigator.permissions && navigator.permissions.query) {
+      const st = await navigator.permissions.query({ name: "microphone" });
+      add("permission state", st.state, st.state === "granted" ? "ok" : "warn");
+    } else {
+      add("permission state", "permissions API unavailable", "warn");
+    }
+  } catch (e) {
+    add("permission state", "query failed: " + e.name, "warn");
+  }
+
+  // does getUserMedia actually work?
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const label = stream.getAudioTracks()[0]?.label || "(no label)";
+    add("getUserMedia", "GRANTED", "ok");
+    add("mic device", label);
+    stream.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    add("getUserMedia", "FAILED — " + e.name, "bad");
+    add("gUM message", e.message || "(none)");
+  }
+
+  // does recognition actually start?
+  if (!SR) { add("recognition", "cannot test, API missing", "bad"); return; }
+  await new Promise((resolve) => {
+    let settled = false;
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.continuous = false;
+    rec.interimResults = false;
+
+    const done = (label, cls, extra) => {
+      if (settled) return;
+      settled = true;
+      add("recognition", label, cls);
+      if (extra) add("recognition detail", extra);
+      try { rec.abort(); } catch (_) {}
+      resolve();
+    };
+
+    rec.onstart = () => add("recognition onstart", "fired — say something", "ok");
+    rec.onaudiostart = () => add("audio captured", "yes", "ok");
+    rec.onresult = (ev) => done("HEARD: " + ev.results[0][0].transcript, "ok");
+    rec.onerror = (ev) => done("ERROR — " + ev.error, "bad", ev.message || "");
+    rec.onend = () => done("ended with no result", "warn");
+
+    try { rec.start(); }
+    catch (e) { done("start() threw — " + e.name, "bad", e.message); }
+
+    setTimeout(() => done("timed out after 8s", "warn"), 8000);
+  });
+});
+</script>
+</body>
+</html>
