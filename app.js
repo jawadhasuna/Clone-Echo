@@ -9,10 +9,7 @@ const RECOGNITION_LANG = "en-US";
 
 // ---- DOM references ----
 const orb = document.getElementById("orb");
-const hint = document.getElementById("hint");
 const statusEl = document.getElementById("status");
-const controls = document.getElementById("controls");
-const endBtn = document.getElementById("endBtn");
 const errorBanner = document.getElementById("errorBanner");
 const orbInner = document.querySelector(".orb-inner");
 
@@ -127,8 +124,7 @@ function playReplyAudio(arrayBuffer) {
         source.connect(playbackAnalyser);
         activeSource = source;
         setOrbState("talking");
-        setStatus("live", true);
-        hint.textContent = "Atom is speaking";
+        setStatus("speaking", true);
         source.onended = () => {
           activeSource = null;
           resolve();
@@ -212,9 +208,7 @@ async function startTurn() {
     clearError();
     turnState = "listening";
     setOrbState("listening");
-    setStatus("connect");
-    hint.textContent = "Listening";
-    controls.classList.add("visible");
+    setStatus("listening", true);
 
     // Start inside the tap's gesture so iOS/Safari don't suspend the
     // playback context we'll need a moment later.
@@ -237,11 +231,11 @@ async function startTurn() {
     try {
       turnState = "thinking";
       setOrbState("connecting");
-      hint.textContent = "Thinking";
+      setStatus("thinking", true);
 
       const reply = await getGeminiReply(transcript);
 
-      hint.textContent = "Generating voice";
+      setStatus("generating voice", true);
       const audioBuffer = await getClonedSpeech(reply);
 
       turnState = "talking";
@@ -287,8 +281,6 @@ function resetToIdle() {
   turnState = "idle";
   setOrbState("idle");
   setStatus("offline");
-  hint.textContent = "Tap to Talk";
-  controls.classList.remove("visible");
 }
 
 function cancelTurn() {
@@ -311,8 +303,9 @@ function cancelTurn() {
 // ============================================================
 // Controls
 // ============================================================
+// The heart is now the only control: click to start, click again to cancel.
+// Removing the stop button without this would leave a turn with no way out.
 orb.addEventListener("click", () => {
   if (turnState === "idle") startTurn();
+  else cancelTurn();
 });
-
-endBtn.addEventListener("click", cancelTurn);
