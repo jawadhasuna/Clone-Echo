@@ -163,19 +163,21 @@ body {
 .orb {
   width: var(--size);
   height: var(--size);
-  border-radius: 50%;
   border: none;
   cursor: pointer;
   background: transparent;
   overflow: hidden;
-  clip-path: circle(50%);
-  -webkit-clip-path: circle(50%);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  clip-path: url(#heartClip);
+  -webkit-clip-path: url(#heartClip);
+  /* clip-path clips box-shadow away entirely, so the depth and the state
+     glows both have to come from drop-shadow, which follows the clipped
+     alpha and therefore hugs the heart's real outline. */
+  filter: drop-shadow(0 8px 22px rgba(0, 0, 0, 0.55));
   position: relative;
   z-index: 2;
   user-select: none;
   -webkit-user-select: none;
-  animation: breathe 4s ease-in-out infinite;
+  animation: breathe 1.9s ease-in-out infinite;
   transform: scale(calc(1 + var(--level) * 0.18));
   transition: box-shadow 0.15s ease;
   will-change: transform;
@@ -211,22 +213,23 @@ body {
   box-shadow: inset 0 -8px 16px rgba(0, 0, 0, 0.35), inset 0 6px 10px rgba(255, 255, 255, 0.15);
 }
 
+/* Two beats then a rest, the way a heart actually sounds. The scale sits on
+   top of the --level transform, so a loud voice still swells it further. */
 @keyframes breathe {
-  0%,
-  100% {
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
-  }
-  50% {
-    box-shadow: 0 8px 36px rgba(0, 0, 0, 0.65);
-  }
+  0%   { transform: scale(calc(1 + var(--level) * 0.18)); }
+  8%   { transform: scale(calc(1.055 + var(--level) * 0.18)); }
+  16%  { transform: scale(calc(1 + var(--level) * 0.18)); }
+  26%  { transform: scale(calc(1.035 + var(--level) * 0.18)); }
+  36%  { transform: scale(calc(1 + var(--level) * 0.18)); }
+  100% { transform: scale(calc(1 + var(--level) * 0.18)); }
 }
 
-.orb:hover {
-  filter: brightness(1.05);
+.orb:hover .orb-inner {
+  filter: brightness(1.08);
 }
 
-.orb:active {
-  filter: brightness(0.95);
+.orb:active .orb-inner {
+  filter: brightness(0.93);
 }
 
 .orb-inner {
@@ -361,9 +364,10 @@ body {
 
 /* Listening state: mic is capturing — orb flows white/silver, reacts to your voice */
 .orb.listening {
-  animation: none;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.12),
-    0 0 calc(14px + var(--level) * 50px) rgba(255, 255, 255, calc(0.3 + var(--level) * 0.5));
+  animation: breathe 1.5s ease-in-out infinite;
+  filter: drop-shadow(0 8px 22px rgba(0, 0, 0, 0.55))
+    drop-shadow(0 0 calc(10px + var(--level) * 34px)
+                rgba(255, 255, 255, calc(0.35 + var(--level) * 0.5)));
 }
 
 .orb.listening .orb-inner {
@@ -377,9 +381,10 @@ body {
 
 /* Talking state: bot audio is playing — orb flows red, reacts to its own voice */
 .orb.talking {
-  animation: none;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.12),
-    0 0 calc(16px + var(--level) * 60px) rgba(200, 19, 36, calc(0.35 + var(--level) * 0.55));
+  animation: breathe 1.05s ease-in-out infinite;
+  filter: drop-shadow(0 8px 22px rgba(0, 0, 0, 0.55))
+    drop-shadow(0 0 calc(12px + var(--level) * 40px)
+                rgba(224, 27, 36, calc(0.45 + var(--level) * 0.55)));
 }
 
 .orb.talking .orb-inner {
