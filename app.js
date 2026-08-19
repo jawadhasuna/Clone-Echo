@@ -237,7 +237,7 @@ async function startTurn() {
 
       const reply = await getGeminiReply(transcript);
 
-      setStatus("generating voice", true);
+      setStatus("generating", true);
       const audioBuffer = await getClonedSpeech(reply);
 
       turnState = "talking";
